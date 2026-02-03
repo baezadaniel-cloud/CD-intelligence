@@ -13,6 +13,23 @@ Esta herramienta automatiza el análisis de segmentación psicográfica.
 Suba los archivos de **Encuesta** y **Censo** para generar el diagnóstico estratégico.
 """)
 
+# --- FUNCIÓN DE CARGA INTELIGENTE ---
+def cargar_archivo(uploaded_file, header_row=0):
+    """Detecta si es CSV o Excel y lo carga correctamente."""
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            try:
+                return pd.read_csv(uploaded_file, header=header_row, encoding='utf-8')
+            except:
+                uploaded_file.seek(0) # Reiniciar puntero si falla el primero
+                return pd.read_csv(uploaded_file, header=header_row, encoding='latin1')
+        else:
+            # Asumimos Excel
+            return pd.read_excel(uploaded_file, header=header_row)
+    except Exception as e:
+        st.error(f"Error cargando {uploaded_file.name}: {e}")
+        return None
+
 # --- CLASE PRINCIPAL ---
 class CommunityDigitalTwin:
     def __init__(self):
@@ -58,13 +75,20 @@ class CommunityDigitalTwin:
         df_universe.rename(columns=cols_map, inplace=True)
         
         if 'Group' not in df_universe.columns: # Fallback por posición
-            df_universe.rename(columns={df_universe.columns[1]: 'Group', df_universe.columns[4]: 'Quantity'}, inplace=True)
+            try:
+                df_universe.rename(columns={df_universe.columns[1]: 'Group', df_universe.columns[4]: 'Quantity'}, inplace=True)
+            except: pass
 
         pop = []
         for _, row in df_universe.iterrows():
             try:
                 group = str(row['Group'])
-                qty = int(float(str(row['Quantity']).replace('.','').replace(',','')))
+                # Limpieza robusta de números
+                qty_raw = str(row['Quantity'])
+                if qty_raw.lower() == 'nan' or qty_raw.strip() == '': continue
+                
+                qty = int(float(qty_raw.replace('.','').replace(',','')))
+                
                 if qty > 0:
                     match = [i for i in self.profiles_prob.index if str(i).lower() in group.lower()]
                     dist = self.profiles_prob.loc[match[0]] if match else self.global_prob
@@ -83,44 +107,59 @@ with col2:
     file_censo = st.file_uploader("2. Subir Censo (CSV/Excel)", type=['csv', 'xlsx'])
 
 if file_encuesta and file_censo:
-    st.success("Procesando...")
+    st.info("Procesando archivos...")
     bot = CommunityDigitalTwin()
     
     try:
-        # Lectura flexible
-        try: df_e = pd.read_csv(file_encuesta, encoding='utf-8')
-        except: df_e = pd.read_csv(file_encuesta, encoding='latin1')
+        # Usamos la función inteligente para cargar
+        # Para la encuesta probamos header 0
+        df_e = cargar_archivo(file_encuesta, header_row=0)
         
-        try: df_c = pd.read_csv(file_censo, header=1)
-        except: df_c = pd.read_csv(file_censo, header=1, encoding='latin1')
+        # Para el censo, a veces el header está en la fila 1 (index 1)
+        # Probamos cargar y si falla buscamos la cabecera
+        df_c = cargar_archivo(file_censo, header_row=1)
+        if df_c is not None and 'Disciplina' not in str(df_c.columns):
+             # Si no se ve bien, intentamos con header 0
+             file_censo.seek(0)
+             df_c = cargar_archivo(file_censo, header_row=0)
 
-        if bot.fit(df_e):
-            df_final = bot.generate(df_c)
-            
-            if df_final is not None:
-                st.divider()
-                st.subheader("🚀 Mapa Estratégico Generado")
+        if df_e is not None and df_c is not None:
+            # Buscamos la fila correcta en la encuesta si es necesario
+            if 'Id respuesta' not in df_e.columns:
+                # Buscar dónde está el ID
+                for i, row in df_e.head(20).iterrows():
+                    if row.astype(str).str.contains('Id respuesta').any():
+                        df_e.columns = df_e.iloc[i]
+                        df_e = df_e[i+1:].reset_index(drop=True)
+                        break
+
+            if bot.fit(df_e):
+                df_final = bot.generate(df_c)
                 
-                # Gráfico
-                res = pd.crosstab(df_final['Group'], df_final['Profile'], normalize='index') * 100
-                res['Size'] = df_final['Group'].value_counts()
-                if 'Social' not in res.columns: res['Social'] = 0
-                if 'Competitivo' not in res.columns: res['Competitivo'] = 0
-                
-                fig, ax = plt.subplots(figsize=(10, 6))
-                sns.scatterplot(data=res, x='Social', y='Competitivo', size='Size', sizes=(100, 1000), alpha=0.7, ax=ax)
-                for i in range(len(res)):
-                    ax.text(res['Social'].iloc[i], res['Competitivo'].iloc[i], res.index[i], size=9)
-                ax.set_title("Mapa de Comunidades")
-                ax.grid(True, alpha=0.3)
-                st.pyplot(fig)
-                
-                # Descarga
-                csv = df_final.to_csv(index=False).encode('utf-8')
-                st.download_button("Descargar CSV Sintético", data=csv, file_name="cduc_sintetico.csv")
+                if df_final is not None and not df_final.empty:
+                    st.divider()
+                    st.subheader("🚀 Mapa Estratégico Generado")
+                    
+                    # Gráfico
+                    res = pd.crosstab(df_final['Group'], df_final['Profile'], normalize='index') * 100
+                    res['Size'] = df_final['Group'].value_counts()
+                    if 'Social' not in res.columns: res['Social'] = 0
+                    if 'Competitivo' not in res.columns: res['Competitivo'] = 0
+                    
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    sns.scatterplot(data=res, x='Social', y='Competitivo', size='Size', sizes=(100, 1000), alpha=0.7, ax=ax)
+                    for i in range(len(res)):
+                        ax.text(res['Social'].iloc[i], res['Competitivo'].iloc[i], res.index[i], size=9)
+                    ax.set_title("Mapa de Comunidades")
+                    ax.grid(True, alpha=0.3)
+                    st.pyplot(fig)
+                    
+                    # Descarga
+                    csv = df_final.to_csv(index=False).encode('utf-8')
+                    st.download_button("Descargar CSV Sintético", data=csv, file_name="cduc_sintetico.csv")
+                else:
+                    st.warning("No se pudo generar la población. Verifica que el archivo de Censo tenga las columnas de 'Disciplina' y 'Total'.")
             else:
-                st.error("Error en el formato del Censo.")
-        else:
-            st.error("Error en las columnas de la Encuesta.")
+                st.error("Error: No se encontraron las columnas clave (Rama, Satisfacción) en la Encuesta.")
     except Exception as e:
-        st.error(f"Error técnico: {e}")
+        st.error(f"Error técnico detallado: {e}")
