@@ -3,9 +3,7 @@ pandas
 numpy
 matplotlib
 seaborn
-openpyxl
 polars
 pyarrow
-gspread
-oauth2client
 xlsxwriter
+openpyxl
